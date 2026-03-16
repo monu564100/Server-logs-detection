@@ -1,0 +1,35 @@
+﻿# Virtual environment
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Data files (optional – you may want to keep data, so adjust as needed)
+data/*.log
+data/*.parquet
+!data/.gitkeep   # to keep the folder structure
+
+# Models
+models/*.pkl
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
