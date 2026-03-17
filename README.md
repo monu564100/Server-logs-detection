@@ -160,7 +160,7 @@ python src/generate_logs.py
 ### 5️⃣  Run the full pipeline
 
 ```bash
-python src/parse_logs.py          # Parse raw logs → structured format
+python src/parse_logs.py          # Parse raw logs structured format
 python src/feature_engineering.py # Build time-window features
 python src/train_model.py          # Train Isolation Forest & detect anomalies
 ```
@@ -294,7 +294,7 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 <!-- Footer wave -->
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=120&section=footer" width="100%"/>
 
-**Made with ❤️ by [Your Name/Org]**
+**Made with ❤️ by [Luthando Candlovu/Org]**
 
 ⭐ **Star us on GitHub** if this project helped you!
 
