@@ -2,10 +2,16 @@
 
 This project runs an end-to-end Linux log anomaly detection flow.
 
-## Dataset priority
+## Dataset source
 
-1. Primary dataset: `data/Linux.log` (local real dataset)
-2. Fallback only if local file is missing: `omduggineni/loghub-linux-log-data` via `kagglehub`
+Training is done on your own local logs.
+
+Default source:
+1. `data/Linux.log`
+2. If missing, any local `data/*.log` / `data/*.txt` / `data/*.out`
+
+Optional custom source:
+- pass `--input` with your log file or folder path.
 
 ## Install
 
@@ -21,9 +27,23 @@ python server.py
 
 `server.py` runs:
 
-1. `python src/parse_logs.py`
-2. `python src/feature_engineering.py`
-3. `python src/train_model.py`
+1. `python src/pipeline.py`
+2. `python src/dashboard.py`
+
+You can also run only the pipeline directly:
+
+```bash
+python src/pipeline.py
+```
+
+Train with your own file/folder and custom Isolation Forest settings:
+
+```bash
+python src/pipeline.py --input data/Linux.log --contamination 0.05 --n-estimators 200 --random-state 42
+```
+
+Training summary is exported to:
+- `data/training_report.json`
 4. `python src/dashboard.py`
 
 ## Main outputs

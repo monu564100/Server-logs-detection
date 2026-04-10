@@ -20,9 +20,7 @@ def start_dashboard() -> None:
 
 def main() -> None:
     try:
-        run_step(ROOT_DIR / "src" / "parse_logs.py")
-        run_step(ROOT_DIR / "src" / "feature_engineering.py")
-        run_step(ROOT_DIR / "src" / "train_model.py")
+        run_step(ROOT_DIR / "src" / "pipeline.py")
         start_dashboard()
     except Exception as exc:
         print(f"\nPipeline stopped: {exc}")

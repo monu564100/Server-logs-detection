@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 from pathlib import Path
 import re
 import shutil
@@ -16,8 +18,8 @@ PARSED_FILE = DATA_DIR / "parsed_logs.parquet"
 FEATURES_FILE = DATA_DIR / "features.parquet"
 FEATURES_ANOMALY_FILE = DATA_DIR / "features_with_anomaly.parquet"
 ANOMALY_XLSX_FILE = DATA_DIR / "anomalies.xlsx"
+TRAINING_REPORT_FILE = DATA_DIR / "training_report.json"
 
-DATASET_NAME = "omduggineni/loghub-linux-log-data"
 PRIMARY_LOCAL_LOG = DATA_DIR / "Linux.log"
 
 IP_REGEX = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b")
@@ -109,14 +111,6 @@ def prepare_parquet_target(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def download_dataset() -> Path:
-    import kagglehub
-
-    dataset_path = Path(kagglehub.dataset_download(DATASET_NAME))
-    print(f"Dataset downloaded to: {dataset_path}")
-    return dataset_path
-
-
 def discover_log_files(dataset_path: Path) -> list[Path]:
     log_files: list[Path] = []
     for ext in ("*.log", "*.txt", "*.out"):
@@ -139,6 +133,20 @@ def discover_local_log_files() -> list[Path]:
     for ext in ("*.log", "*.txt", "*.out"):
         local_logs.extend(DATA_DIR.rglob(ext))
     return sorted(set([p for p in local_logs if p.is_file()]))
+
+
+def discover_training_files(input_path: Optional[Path] = None) -> list[Path]:
+    if input_path is None:
+        return discover_local_log_files()
+
+    candidate = input_path.expanduser().resolve()
+    if candidate.is_file():
+        return [candidate]
+
+    if candidate.is_dir():
+        return discover_log_files(candidate)
+
+    raise FileNotFoundError(f"Training input path not found: {candidate}")
 
 
 def parse_timestamp(text: str) -> pd.Timestamp:
@@ -223,18 +231,22 @@ def parse_logs_from_files(files: Iterable[Path]) -> pd.DataFrame:
     return df_logs
 
 
-def run_parse_step() -> pd.DataFrame:
+def run_parse_step(input_path: Optional[Path] = None) -> pd.DataFrame:
     ensure_dirs()
-    log_files = discover_local_log_files()
-    source = "local data folder"
+    log_files = discover_training_files(input_path)
+    source = "local data folder" if input_path is None else str(input_path)
 
     if not log_files:
-        dataset_path = download_dataset()
-        log_files = discover_log_files(dataset_path)
-        source = f"kaggle dataset ({dataset_path})"
+        if PARSED_FILE.exists():
+            print("No raw logs found. Reusing existing parsed dataset from data/parsed_logs.parquet")
+            df_logs = pd.read_parquet(PARSED_FILE)
+            if df_logs.empty:
+                raise RuntimeError("Existing parsed dataset is empty. Provide local raw logs to continue.")
+            return df_logs
 
-    if not log_files:
-        raise RuntimeError("No log files found in downloaded dataset.")
+        raise RuntimeError(
+            "No local training log files found. Place logs in data/Linux.log or pass --input with your file/folder."
+        )
 
     print(f"Found {len(log_files)} log files from {source}. Parsing...")
     for file_path in log_files:
@@ -258,7 +270,7 @@ def run_parse_step() -> pd.DataFrame:
     return df_logs
 
 
-def run_feature_step(df_logs: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def run_feature_step(df_logs: Optional[pd.DataFrame] = None, window_minutes: int = 5) -> pd.DataFrame:
     ensure_dirs()
     if df_logs is None:
         if not PARSED_FILE.exists():
@@ -271,7 +283,7 @@ def run_feature_step(df_logs: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     df_logs = df_logs.copy()
     df_logs["timestamp"] = pd.to_datetime(df_logs["timestamp"], errors="coerce")
     df_logs = df_logs.dropna(subset=["timestamp"])
-    df_logs["time_bin"] = df_logs["timestamp"].dt.floor("5min")
+    df_logs["time_bin"] = df_logs["timestamp"].dt.floor(f"{window_minutes}min")
 
     features = df_logs.groupby("time_bin").agg(
         log_count=("message", "count"),
@@ -288,7 +300,38 @@ def run_feature_step(df_logs: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     return features
 
 
-def run_train_step(features: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+def _write_training_report(
+    *,
+    features_with_anomaly: pd.DataFrame,
+    contamination: float,
+    n_estimators: int,
+    random_state: int,
+) -> None:
+    attack_count = int((features_with_anomaly["attack_prediction"] == "Attack").sum())
+    report = {
+        "model": "IsolationForest",
+        "mode": "unsupervised",
+        "parameters": {
+            "contamination": contamination,
+            "n_estimators": n_estimators,
+            "random_state": random_state,
+        },
+        "training_windows": int(len(features_with_anomaly)),
+        "predicted_attack_windows": attack_count,
+        "attack_window_ratio": round(attack_count / max(len(features_with_anomaly), 1), 6),
+        "feature_columns": FEATURE_COLUMNS,
+    }
+    TRAINING_REPORT_FILE.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"Training report saved to: {TRAINING_REPORT_FILE}")
+
+
+def run_train_step(
+    features: Optional[pd.DataFrame] = None,
+    *,
+    contamination: float = 0.05,
+    n_estimators: int = 200,
+    random_state: int = 42,
+) -> pd.DataFrame:
     ensure_dirs()
     if features is None:
         if not FEATURES_FILE.exists():
@@ -304,7 +347,11 @@ def run_train_step(features: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(x)
 
-    model = IsolationForest(contamination=0.05, random_state=42)
+    model = IsolationForest(
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
     model.fit(x_scaled)
 
     features["anomaly"] = model.predict(x_scaled)
@@ -318,6 +365,12 @@ def run_train_step(features: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     print(f"Features with anomalies saved to: {FEATURES_ANOMALY_FILE}")
     attack_count = int((features["attack_prediction"] == "Attack").sum())
     print(f"Training windows: {len(features)} | Predicted attack windows: {attack_count}")
+    _write_training_report(
+        features_with_anomaly=features,
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
     return features
 
 
@@ -366,9 +419,90 @@ def export_anomalies_to_excel(
     return ANOMALY_XLSX_FILE
 
 
-def run_full_pipeline() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Path]:
-    logs = run_parse_step()
-    features = run_feature_step(logs)
-    features_with_anomaly = run_train_step(features)
+def run_full_pipeline(
+    *,
+    input_path: Optional[Path] = None,
+    window_minutes: int = 5,
+    contamination: float = 0.05,
+    n_estimators: int = 200,
+    random_state: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Path]:
+    logs = run_parse_step(input_path=input_path)
+    features = run_feature_step(logs, window_minutes=window_minutes)
+    features_with_anomaly = run_train_step(
+        features,
+        contamination=contamination,
+        n_estimators=n_estimators,
+        random_state=random_state,
+    )
     excel_path = export_anomalies_to_excel(features_with_anomaly, logs)
     return logs, features, features_with_anomaly, excel_path
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run log anomaly pipeline steps from a single file.")
+    parser.add_argument(
+        "--step",
+        choices=["parse", "feature", "train", "full"],
+        default="full",
+        help="Pipeline step to run (default: full).",
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default=None,
+        help="Path to your own log file or folder. If omitted, uses data/Linux.log or data/*.log.",
+    )
+    parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=5,
+        help="Aggregation window size in minutes for feature engineering.",
+    )
+    parser.add_argument(
+        "--contamination",
+        type=float,
+        default=0.05,
+        help="IsolationForest expected anomaly fraction (0.0 to 0.5).",
+    )
+    parser.add_argument(
+        "--n-estimators",
+        type=int,
+        default=200,
+        help="Number of trees in IsolationForest.",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=42,
+        help="Random seed used by IsolationForest.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    input_path = Path(args.input) if args.input else None
+
+    if args.step == "parse":
+        run_parse_step(input_path=input_path)
+    elif args.step == "feature":
+        run_feature_step(window_minutes=args.window_minutes)
+    elif args.step == "train":
+        run_train_step(
+            contamination=args.contamination,
+            n_estimators=args.n_estimators,
+            random_state=args.random_state,
+        )
+    else:
+        run_full_pipeline(
+            input_path=input_path,
+            window_minutes=args.window_minutes,
+            contamination=args.contamination,
+            n_estimators=args.n_estimators,
+            random_state=args.random_state,
+        )
+
+
+if __name__ == "__main__":
+    main()

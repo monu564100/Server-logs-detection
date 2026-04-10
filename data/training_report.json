@@ -1,0 +1,20 @@
+{
+  "model": "IsolationForest",
+  "mode": "unsupervised",
+  "parameters": {
+    "contamination": 0.05,
+    "n_estimators": 200,
+    "random_state": 42
+  },
+  "training_windows": 86,
+  "predicted_attack_windows": 5,
+  "attack_window_ratio": 0.05814,
+  "feature_columns": [
+    "log_count",
+    "error_ratio",
+    "warn_ratio",
+    "avg_message_len",
+    "unique_services",
+    "unique_ips"
+  ]
+}

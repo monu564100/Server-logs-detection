@@ -36,13 +36,13 @@ Primary training source (current):
 
 Pipeline behavior:
 - If data/Linux.log exists, it is used directly (priority)
-- Kaggle fallback is used only if local file is missing
-  Dataset fallback name: omduggineni/loghub-linux-log-data
+- Otherwise local logs in data/ are used (*.log, *.txt, *.out)
+- You can also pass a custom local file/folder using --input
 
 Current verified source behavior:
 - The parser prints source file path(s)
 - Parsed source counts are printed
-- Parsed rows currently come from data/Linux.log
+- Parsed rows currently come from local data sources
 
 
 4) Training logic and feature logic
@@ -86,6 +86,9 @@ Prediction columns produced:
 - prediction_confidence_pct
 - prediction_accuracy_level_pct
 
+Training report output:
+- data/training_report.json (model type, parameters, training window counts)
+
 
 5) Attack prediction behavior
 -----------------------------
@@ -117,9 +120,6 @@ Critical IP indicators include:
 -------------------------------------------------
 - server.py
 - src/pipeline.py
-- src/parse_logs.py
-- src/feature_engineering.py
-- src/train_model.py
 - src/dashboard.py
 - data/Linux.log
 
@@ -136,10 +136,8 @@ Recommended single command:
 - python server.py
 
 This executes in order:
-1) python src/parse_logs.py
-2) python src/feature_engineering.py
-3) python src/train_model.py
-4) python src/dashboard.py
+1) python src/pipeline.py
+2) python src/dashboard.py
 
 
 9) Dashboard outputs
