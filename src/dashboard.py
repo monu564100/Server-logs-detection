@@ -1,220 +1,333 @@
-﻿import dash
-from dash import dcc, html, Input, Output, callback_context
-import plotly.graph_objs as go
-import plotly.express as px
+﻿from __future__ import annotations
+
+from pathlib import Path
+
+import dash
+from dash import Input, Output, dcc, html
 import pandas as pd
-import joblib
-import base64
-import io
-import subprocess
-import os
-from datetime import datetime
+import plotly.express as px
+import plotly.graph_objs as go
 
-# Load data
-df_features = pd.read_parquet('data/features_with_anomaly.parquet')
-df_logs = pd.read_parquet('data/parsed_logs.parquet')
-model = joblib.load('models/isolation_forest.pkl')
-scaler = joblib.load('models/scaler.pkl')
+from pipeline import (
+    ANOMALY_XLSX_FILE,
+    FEATURES_ANOMALY_FILE,
+    PARSED_FILE,
+    export_anomalies_to_excel,
+    run_full_pipeline,
+)
 
-services = ['All'] + sorted(df_logs['service'].unique().tolist())
+
+def ensure_pipeline_outputs() -> None:
+    if FEATURES_ANOMALY_FILE.exists() and PARSED_FILE.exists():
+        return
+    print("Running full pipeline: parse -> features -> train -> excel export")
+    run_full_pipeline()
+
+
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    features = pd.read_parquet(FEATURES_ANOMALY_FILE)
+    logs = pd.read_parquet(PARSED_FILE)
+    features["time_bin"] = pd.to_datetime(features["time_bin"], errors="coerce")
+    logs["timestamp"] = pd.to_datetime(logs["timestamp"], errors="coerce")
+    if "ip" not in logs.columns:
+        logs["ip"] = "Unknown"
+    if "attack_prediction" not in features.columns:
+        features["attack_prediction"] = features["anomaly"].map({-1: "Attack", 1: "Normal"}).fillna("Normal")
+    if "severity" not in features.columns:
+        features["severity"] = features["attack_prediction"].map({"Attack": "High", "Normal": "Normal"}).fillna("Normal")
+    if "prediction_confidence_pct" not in features.columns:
+        features["prediction_confidence_pct"] = 60.0
+    if "prediction_accuracy_level_pct" not in features.columns:
+        features["prediction_accuracy_level_pct"] = 60.0
+    return features, logs
+
+
+ensure_pipeline_outputs()
+df_features, df_logs = load_data()
+
+services = ["All"] + sorted(df_logs["service"].dropna().unique().tolist())
 
 app = dash.Dash(__name__)
 
-app.layout = html.Div([
-    html.H1("Log Anomaly Detection Dashboard", style={'text-align': 'center'}),
-
-    # Summary cards
-    html.Div([
-        html.Div([
-            html.H4("Total Logs"),
-            html.H2(id='total-logs')
-        ], className='card', style={'display': 'inline-block', 'margin': '10px', 'padding': '10px', 'border': '1px solid #ddd'}),
-        html.Div([
-            html.H4("Total Anomalies"),
-            html.H2(id='total-anomalies')
-        ], className='card', style={'display': 'inline-block', 'margin': '10px', 'padding': '10px', 'border': '1px solid #ddd'}),
-        html.Div([
-            html.H4("Anomaly %"),
-            html.H2(id='anomaly-percent')
-        ], className='card', style={'display': 'inline-block', 'margin': '10px', 'padding': '10px', 'border': '1px solid #ddd'}),
-    ], style={'text-align': 'center'}),
-
-    # Buttons
-    html.Div([
-        html.Button("Export Anomalies as CSV", id="btn-export"),
-        dcc.Download(id="download-anomalies"),
-        html.Button("Retrain Model", id="btn-retrain", style={'margin-left': '20px'}),
-        html.Div(id='retrain-status')
-    ], style={'margin': '20px'}),
-
-    # Auto-refresh interval
-    dcc.Interval(id='interval-component', interval=60*1000, n_intervals=0),  # 60 seconds
-
-    # Service filter
-    html.Label("Filter by Service:"),
-    dcc.Dropdown(
-        id='service-dropdown',
-        options=[{'label': s, 'value': s} for s in services],
-        value='All',
-        clearable=False,
-        style={'width': '300px', 'margin-bottom': '20px'}
-    ),
-
-    dcc.Tabs(id='tabs', value='tab-1', children=[
-        dcc.Tab(label='Log Volume & Anomalies', value='tab-1'),
-        dcc.Tab(label='Error Rate Over Time', value='tab-2'),
-    ]),
-
-    html.Div(id='tab-content'),
-
-    # Raw logs section
-    html.Hr(),
-    html.H3("Raw Logs for Selected Anomaly Window"),
-    html.Label("Select a time window (from top anomalies):"),
-    dcc.Dropdown(id='window-dropdown', options=[], value=None),
-    html.Div(id='raw-logs-output', style={'white-space': 'pre-wrap', 'font-family': 'monospace', 'max-height': '400px', 'overflow-y': 'scroll'})
-])
-
-# Callback to refresh data on interval
-@app.callback(
-    [Output('total-logs', 'children'),
-     Output('total-anomalies', 'children'),
-     Output('anomaly-percent', 'children'),
-     Output('tab-content', 'children', allow_duplicate=True),
-     Output('window-dropdown', 'options', allow_duplicate=True)],
-    [Input('interval-component', 'n_intervals'),
-     Input('service-dropdown', 'value'),
-     Input('tabs', 'value')],
-    prevent_initial_call=True
+app.layout = html.Div(
+    [
+        html.H1("Log Anomaly Detection Dashboard", style={"text-align": "center"}),
+        html.P(
+            "Pipeline order: parse logs -> build features -> train model -> show results.",
+            style={"text-align": "center", "color": "#444"},
+        ),
+        html.Div(
+            [
+                html.Div(
+                    [html.H4("Total Logs"), html.H2(id="total-logs")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Total Anomalies"), html.H2(id="total-anomalies")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Anomaly %"), html.H2(id="anomaly-percent")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Unique IPs"), html.H2(id="total-ips")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Critical IPs"), html.H2(id="critical-ips")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Prediction Accuracy Level"), html.H2(id="prediction-accuracy")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+                html.Div(
+                    [html.H4("Avg Prediction Confidence"), html.H2(id="prediction-confidence")],
+                    style={"display": "inline-block", "margin": "8px", "padding": "12px", "border": "1px solid #ddd"},
+                ),
+            ],
+            style={"text-align": "center"},
+        ),
+        html.Div(
+            [
+                html.Button("Refresh Pipeline", id="btn-refresh"),
+                html.Button("Export Anomalies to Excel", id="btn-export", style={"margin-left": "12px"}),
+                dcc.Download(id="download-excel"),
+                html.Div(id="pipeline-status", style={"margin-top": "12px"}),
+            ],
+            style={"margin": "20px 0"},
+        ),
+        dcc.Interval(id="interval-component", interval=60 * 1000, n_intervals=0),
+        html.Label("Filter by Service:"),
+        dcc.Dropdown(
+            id="service-dropdown",
+            options=[{"label": s, "value": s} for s in services],
+            value="All",
+            clearable=False,
+            style={"width": "320px", "margin-bottom": "16px"},
+        ),
+        dcc.Tabs(
+            id="tabs",
+            value="tab-1",
+            children=[
+                dcc.Tab(label="Volume & Anomalies", value="tab-1"),
+                dcc.Tab(label="Error Ratio", value="tab-2"),
+                dcc.Tab(label="Top IPs", value="tab-3"),
+                dcc.Tab(label="Critical IPs", value="tab-4"),
+            ],
+        ),
+        html.Div(id="tab-content"),
+        html.Hr(),
+        html.H3("Raw Logs for Selected Anomaly Window (Includes IP)"),
+        dcc.Dropdown(id="window-dropdown", options=[], value=None),
+        html.Div(id="raw-logs-output", style={"white-space": "pre-wrap", "font-family": "monospace", "max-height": "380px", "overflow-y": "scroll"}),
+    ],
+    style={"padding": "20px"},
 )
-def refresh_data(n, selected_service, tab):
-    # Reload data
-    df_features_new = pd.read_parquet('data/features_with_anomaly.parquet')
-    df_logs_new = pd.read_parquet('data/parsed_logs.parquet')
-    
-    # Update global variables (not ideal, but works for demo)
-    global df_features, df_logs
-    df_features = df_features_new
-    df_logs = df_logs_new
 
-    total_logs = f"{len(df_logs):,}"
-    total_anomalies = (df_features['anomaly'] == -1).sum()
-    anomaly_percent = f"{((df_features['anomaly'] == -1).mean() * 100):.1f}%"
 
-    # Update tab content
-    if tab == 'tab-1':
-        tab_content = render_volume_tab(selected_service)
-    elif tab == 'tab-2':
-        tab_content = render_error_tab(selected_service)
+def current_data(selected_service: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    features = df_features.copy()
+    logs = df_logs.copy()
+    if selected_service != "All":
+        logs = logs[logs["service"] == selected_service].copy()
+        if not logs.empty:
+            logs["time_bin"] = logs["timestamp"].dt.floor("5min")
+            valid_bins = logs["time_bin"].unique()
+            features = features[features["time_bin"].isin(valid_bins)].copy()
+    return features, logs
 
-    # Update dropdown options
-    top_anomalies = df_features.nsmallest(10, 'anomaly_score')[['time_bin']]
-    dropdown_options = [{'label': str(row['time_bin']), 'value': str(row['time_bin'])} 
-                        for _, row in top_anomalies.iterrows()]
 
-    return total_logs, total_anomalies, anomaly_percent, tab_content, dropdown_options
-
-def render_volume_tab(selected_service):
+def render_volume_tab(features: pd.DataFrame) -> html.Div:
     fig = go.Figure()
-    normal = df_features[df_features['anomaly'] == 1]
-    fig.add_trace(go.Scatter(x=normal['time_bin'], y=normal['log_count'],
-                             mode='markers', name='Normal',
-                             marker=dict(color='blue', size=4)))
-    anomalous = df_features[df_features['anomaly'] == -1]
-    fig.add_trace(go.Scatter(x=anomalous['time_bin'], y=anomalous['log_count'],
-                             mode='markers', name='Anomaly',
-                             marker=dict(color='red', size=8, symbol='x')))
-    fig.update_layout(title=f'Log Count per 5-min Window (Service: {selected_service})',
-                      xaxis_title='Time', yaxis_title='Number of Logs')
+    normal = features[features["attack_prediction"] == "Normal"]
+    anomalous = features[features["attack_prediction"] == "Attack"]
 
-    top_anomalies = df_features.nsmallest(10, 'anomaly_score')[['time_bin', 'log_count', 'error_ratio', 'anomaly_score']]
-    table = html.Table([
-        html.Thead(html.Tr([html.Th(col) for col in top_anomalies.columns]))
-    ] + [
-        html.Tr([html.Td(str(top_anomalies.iloc[i][col])) for col in top_anomalies.columns])
-        for i in range(len(top_anomalies))
-    ])
+    fig.add_trace(
+        go.Scatter(
+            x=normal["time_bin"],
+            y=normal["log_count"],
+            mode="markers",
+            name="Normal",
+            marker={"color": "#1f77b4", "size": 5},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=anomalous["time_bin"],
+            y=anomalous["log_count"],
+            mode="markers",
+            name="Anomaly",
+            marker={"color": "#d62728", "size": 9, "symbol": "x"},
+        )
+    )
+    fig.update_layout(title="Log Count per 5-minute Window", xaxis_title="Time", yaxis_title="Log Count")
 
-    return html.Div([
-        dcc.Graph(figure=fig),
-        html.H4("Top Anomalous Windows"),
-        table
-    ])
+    top = features.nsmallest(10, "anomaly_score")[
+        ["time_bin", "log_count", "error_ratio", "unique_ips", "anomaly_score", "severity", "attack_prediction"]
+    ]
+    table = html.Table(
+        [html.Thead(html.Tr([html.Th(col) for col in top.columns]))]
+        + [
+            html.Tr([html.Td(str(top.iloc[i][col])) for col in top.columns])
+            for i in range(len(top))
+        ]
+    )
 
-def render_error_tab(selected_service):
-    df_error = df_features[['time_bin', 'error_ratio']].copy()
-    fig = px.line(df_error, x='time_bin', y='error_ratio', title='Error Ratio Over Time')
-    if selected_service != 'All':
-        fig.update_layout(title=f'Error Ratio Over Time (Service: {selected_service})')
+    return html.Div([dcc.Graph(figure=fig), html.H4("Top Anomaly Windows"), table])
+
+
+def render_error_tab(features: pd.DataFrame) -> dcc.Graph:
+    fig = px.line(features, x="time_bin", y="error_ratio", title="Error Ratio Over Time")
     return dcc.Graph(figure=fig)
 
-# Callback for dropdown updates (triggered by service filter or interval)
-@app.callback(
-    Output('window-dropdown', 'options'),
-    [Input('service-dropdown', 'value'),
-     Input('interval-component', 'n_intervals')]
-)
-def update_dropdown(selected_service, _):
-    top_anomalies = df_features.nsmallest(10, 'anomaly_score')[['time_bin']]
-    dropdown_options = [{'label': str(row['time_bin']), 'value': str(row['time_bin'])} 
-                        for _, row in top_anomalies.iterrows()]
-    return dropdown_options
 
-# Callback for raw logs
-@app.callback(
-    Output('raw-logs-output', 'children'),
-    [Input('window-dropdown', 'value'),
-     Input('service-dropdown', 'value')]
-)
-def display_raw_logs(selected_window, selected_service):
-    if selected_window is None:
-        return "Select a time window to view raw logs."
-    
-    selected_time = pd.to_datetime(selected_window)
-    start_time = selected_time
-    end_time = selected_time + pd.Timedelta(minutes=5)
-    
-    mask = (df_logs['timestamp'] >= start_time) & (df_logs['timestamp'] < end_time)
-    if selected_service != 'All':
-        mask &= (df_logs['service'] == selected_service)
-    
-    logs_in_window = df_logs[mask]
-    
-    if logs_in_window.empty:
-        return "No logs found in this window with selected filter."
-    
-    log_lines = []
-    for _, row in logs_in_window.iterrows():
-        log_lines.append(f"{row['timestamp']} {row['service']} {row['level']}: {row['message']}")
-    
-    return html.Pre('\n'.join(log_lines))
+def render_ip_tab(logs: pd.DataFrame) -> html.Div:
+    known_ips = logs[logs["ip"] != "Unknown"] if "ip" in logs.columns else logs.iloc[0:0]
+    if known_ips.empty:
+        return html.Div("No concrete IPs found in current filter.")
 
-# Export anomalies as CSV
+    ip_counts = known_ips.groupby("ip").size().reset_index(name="count").sort_values("count", ascending=False).head(15)
+    fig = px.bar(ip_counts, x="ip", y="count", title="Top IPs by Log Volume")
+    return html.Div([dcc.Graph(figure=fig)])
+
+
+def render_critical_ip_tab(features: pd.DataFrame, logs: pd.DataFrame) -> html.Div:
+    attack_windows = set(features.loc[features["attack_prediction"] == "Attack", "time_bin"].tolist())
+    if not attack_windows:
+        return html.Div("No attack windows found in current view.")
+
+    logs = logs.copy()
+    logs["time_bin"] = logs["timestamp"].dt.floor("5min")
+    critical_logs = logs[(logs["time_bin"].isin(attack_windows)) & (logs["ip"] != "Unknown")]
+    if critical_logs.empty:
+        return html.Div("No concrete critical IPs found in attack windows.")
+
+    ip_stats = (
+        critical_logs.groupby("ip")
+        .agg(log_count=("message", "count"), error_count=("level", lambda x: (x == "ERROR").sum()))
+        .reset_index()
+        .sort_values(["error_count", "log_count"], ascending=False)
+        .head(20)
+    )
+    ip_stats["attack_score"] = ip_stats["error_count"] * 2 + ip_stats["log_count"]
+    fig = px.bar(ip_stats, x="ip", y="attack_score", title="Critical IPs (from predicted attack windows)")
+
+    table = html.Table(
+        [html.Thead(html.Tr([html.Th(col) for col in ip_stats.columns]))]
+        + [
+            html.Tr([html.Td(str(ip_stats.iloc[i][col])) for col in ip_stats.columns])
+            for i in range(len(ip_stats))
+        ]
+    )
+    return html.Div([dcc.Graph(figure=fig), html.H4("Critical IP Table"), table])
+
+
 @app.callback(
-    Output("download-anomalies", "data"),
+    [
+        Output("total-logs", "children"),
+        Output("total-anomalies", "children"),
+        Output("anomaly-percent", "children"),
+        Output("total-ips", "children"),
+        Output("critical-ips", "children"),
+        Output("prediction-accuracy", "children"),
+        Output("prediction-confidence", "children"),
+        Output("tab-content", "children"),
+        Output("window-dropdown", "options"),
+    ],
+    [Input("interval-component", "n_intervals"), Input("service-dropdown", "value"), Input("tabs", "value")],
+)
+def refresh_view(_, selected_service: str, tab: str):
+    features, logs = current_data(selected_service)
+
+    total_logs = f"{len(logs):,}"
+    anomalies = int((features["attack_prediction"] == "Attack").sum()) if not features.empty else 0
+    anomaly_percent = f"{((features['attack_prediction'] == 'Attack').mean() * 100):.1f}%" if not features.empty else "0.0%"
+    unique_ips = logs.loc[logs["ip"] != "Unknown", "ip"].nunique() if not logs.empty else 0
+
+    logs_with_bin = logs.copy()
+    logs_with_bin["time_bin"] = logs_with_bin["timestamp"].dt.floor("5min") if not logs_with_bin.empty else pd.Series(dtype="datetime64[ns]")
+    attack_bins = set(features.loc[features["attack_prediction"] == "Attack", "time_bin"].tolist())
+    critical_ips = logs_with_bin[(logs_with_bin["time_bin"].isin(attack_bins)) & (logs_with_bin["ip"] != "Unknown")]["ip"].nunique() if not logs_with_bin.empty else 0
+    prediction_accuracy = float(features["prediction_accuracy_level_pct"].iloc[0]) if not features.empty else 0.0
+    prediction_confidence = float(features["prediction_confidence_pct"].mean()) if not features.empty else 0.0
+
+    if tab == "tab-2":
+        tab_content = render_error_tab(features)
+    elif tab == "tab-3":
+        tab_content = render_ip_tab(logs)
+    elif tab == "tab-4":
+        tab_content = render_critical_ip_tab(features, logs)
+    else:
+        tab_content = render_volume_tab(features)
+
+    top_anomalies = features.nsmallest(min(10, len(features)), "anomaly_score")[["time_bin"]] if not features.empty else pd.DataFrame(columns=["time_bin"])
+    options = [{"label": str(row["time_bin"]), "value": str(row["time_bin"])} for _, row in top_anomalies.iterrows()]
+    return (
+        total_logs,
+        f"{anomalies:,}",
+        anomaly_percent,
+        f"{unique_ips:,}",
+        f"{critical_ips:,}",
+        f"{prediction_accuracy:.1f}%",
+        f"{prediction_confidence:.1f}%",
+        tab_content,
+        options,
+    )
+
+
+@app.callback(
+    Output("raw-logs-output", "children"),
+    [Input("window-dropdown", "value"), Input("service-dropdown", "value")],
+)
+def render_raw_logs(selected_window: str | None, selected_service: str):
+    if not selected_window:
+        return "Select an anomaly window to view logs with IP addresses."
+
+    start = pd.to_datetime(selected_window)
+    end = start + pd.Timedelta(minutes=5)
+
+    logs = df_logs.copy()
+    mask = (logs["timestamp"] >= start) & (logs["timestamp"] < end)
+    if selected_service != "All":
+        mask &= logs["service"] == selected_service
+
+    subset = logs[mask]
+    if subset.empty:
+        return "No logs found for this window and service filter."
+
+    lines = [
+        f"{row.timestamp} {row.service} {row.level} ip={row.ip}: {row.message}"
+        for row in subset.itertuples(index=False)
+    ]
+    return html.Pre("\n".join(lines))
+
+
+@app.callback(
+    Output("download-excel", "data"),
     Input("btn-export", "n_clicks"),
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
-def export_anomalies(n_clicks):
-    df_anomalies = df_features[df_features['anomaly'] == -1].copy()
-    return dcc.send_data_frame(df_anomalies.to_csv, "anomalies.csv")
+def download_excel(_):
+    path = export_anomalies_to_excel(df_features, df_logs)
+    return dcc.send_file(str(path))
 
-# Retrain model
+
 @app.callback(
-    Output('retrain-status', 'children'),
-    Input('btn-retrain', 'n_clicks'),
-    prevent_initial_call=True
+    Output("pipeline-status", "children"),
+    Input("btn-refresh", "n_clicks"),
+    prevent_initial_call=True,
 )
-def retrain_model(n_clicks):
+def rerun_pipeline(_):
+    global df_features, df_logs
     try:
-        # Run retrain.py script
-        result = subprocess.run(['python', 'src/retrain.py'], capture_output=True, text=True)
-        if result.returncode == 0:
-            return html.Div("✅ Model retrained successfully!", style={'color': 'green'})
-        else:
-            return html.Div(f"❌ Retrain failed: {result.stderr}", style={'color': 'red'})
-    except Exception as e:
-        return html.Div(f"❌ Error: {str(e)}", style={'color': 'red'})
+        run_full_pipeline()
+        df_features, df_logs = load_data()
+        return html.Div("Pipeline rerun completed: parse -> features -> train -> dashboard refreshed.", style={"color": "green"})
+    except Exception as exc:
+        return html.Div(f"Pipeline rerun failed: {exc}", style={"color": "red"})
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(debug=True)

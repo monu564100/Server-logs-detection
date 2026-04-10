@@ -15,9 +15,6 @@ data/*.log
 data/*.parquet
 !data/.gitkeep   # to keep the folder structure
 
-# Models
-models/*.pkl
-
 # IDE
 .vscode/
 .idea/
