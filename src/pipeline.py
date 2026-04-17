@@ -1,19 +1,16 @@
 from __future__ import annotations
-
 import argparse
 import json
 from pathlib import Path
 import re
 import shutil
 from typing import Iterable, Optional
-
 import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-
 PARSED_FILE = DATA_DIR / "parsed_logs.parquet"
 FEATURES_FILE = DATA_DIR / "features.parquet"
 FEATURES_ANOMALY_FILE = DATA_DIR / "features_with_anomaly.parquet"
